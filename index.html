@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Group Video Chat</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://sdk.twilio.com/js/video/releases/2.23.0/twilio-video.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: #f0f2f5;
+        }
+
+        #controls {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        button {
+            padding: 12px 24px;
+            margin: 0 10px;
+            border: none;
+            border-radius: 4px;
+            background: #007bff;
+            color: white;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        #status {
+            text-align: center;
+            color: #495057;
+            margin: 15px 0;
+            font-size: 1.1em;
+        }
+
+        #video-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            padding: 15px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .participant {
+            background: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+            position: relative;
+        }
+
+        .media-container {
+            position: relative;
+            width: 100%;
+            padding-bottom: 56.25%;
+        }
+
+        video {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .local-video video {
+            transform: scaleX(-1);
+        }
+
+        .identity {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(transparent, rgba(0,0,0,0.7));
+            color: white;
+            padding: 8px 12px;
+            font-size: 0.9em;
+            z-index: 2;
+        }
+
+        @media (max-width: 768px) {
+            #video-container {
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            }
+            button {
+                padding: 10px 20px;
+                font-size: 0.9em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <button id="join-button">Join Room</button>
+        <button id="leave-button" disabled>Leave Room</button>
+    </div>
+    <div id="status">Status: Disconnected</div>
+    <div id="video-container"></div>
+
+    <script>
+        let activeRoom = null;
+        const participants = new Map();
+
+        async function getToken() {
+            try {
+                const response = await fetch('/token');
+                if (!response.ok) throw new Error('Network error');
+                return await response.json();
+            } catch (error) {
+                console.error('Token error:', error);
+                throw error;
+            }
+        }
+
+        function handleParticipant(participant) {
+            if (participants.has(participant.sid)) return;
+
+            const participantDiv = $(`
+                <div class="participant ${participant === activeRoom.localParticipant ? 'local-video' : ''}" 
+                     id="${participant.sid}">
+                    <div class="media-container"></div>
+                    <div class="identity">${participant.identity}</div>
+                </div>
+            `);
+
+            participants.set(participant.sid, participantDiv);
+            $('#video-container').append(participantDiv);
+
+            participant.tracks.forEach(publication => {
+                if (publication.track) attachTrack(participantDiv, publication.track);
+            });
+
+            participant.on('trackSubscribed', track => attachTrack(participantDiv, track));
+            participant.on('trackUnsubscribed', track => track.detach().forEach(e => e.remove()));
+        }
+
+        function attachTrack(participantDiv, track) {
+            const mediaElement = track.attach();
+            participantDiv.find('.media-container').append(mediaElement);
+        }
+
+        function removeParticipant(participant) {
+            const element = participants.get(participant.sid);
+            if (element) {
+                element.remove();
+                participants.delete(participant.sid);
+            }
+        }
+
+        $('#join-button').click(async () => {
+            try {
+                const { token } = await getToken();
+                
+                activeRoom = await Twilio.Video.connect(token, {
+                    video: { width: 640, height: 480 },
+                    audio: true,
+                    preferredVideoCodecs: ['H264']
+                });
+
+                $('#join-button').prop('disabled', true);
+                $('#leave-button').prop('disabled', false);
+                $('#status').text(`Connected to ${activeRoom.name}`);
+
+                handleParticipant(activeRoom.localParticipant);
+                activeRoom.participants.forEach(handleParticipant);
+                activeRoom.on('participantConnected', handleParticipant);
+                activeRoom.on('participantDisconnected', removeParticipant);
+                activeRoom.on('disconnected', () => {
+                    $('#video-container').empty();
+                    participants.clear();
+                    $('#status').text('Disconnected');
+                    $('#join-button').prop('disabled', false);
+                    $('#leave-button').prop('disabled', true);
+                });
+
+            } catch (error) {
+                console.error('Connection failed:', error);
+                alert(`Error: ${error.message}`);
+            }
+        });
+
+        $('#leave-button').click(() => activeRoom && activeRoom.disconnect());
+    </script>
+</body>
+</html>

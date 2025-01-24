@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Twilio Video Chat</title>
+    <!-- Load Twilio SDKs in correct order -->
+    <script src="https://sdk.twilio.com/js/video/releases/2.23.0/twilio-video.min.js"></script>
+    <script src="https://sdk.twilio.com/js/conversations/releases/2.2.0/twilio-conversations.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        #messages {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+
+        .message {
+            margin: 8px 0;
+            padding: 8px 12px;
+            border-radius: 15px;
+            max-width: 70%;
+        }
+
+        .received {
+            background: #e9ecef;
+            align-self: flex-start;
+        }
+
+        .sent {
+            background: #007bff;
+            color: white;
+            margin-left: auto;
+        }
+
+        #messageInput {
+            width: calc(100% - 90px);
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-right: 10px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        #status {
+            color: #666;
+            margin-bottom: 10px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Video Chat Room</h1>
+        <div id="status">Connecting...</div>
+        <div id="messages"></div>
+        <div>
+            <input type="text" id="messageInput" placeholder="Type your message...">
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+
+    <script>
+        let client;
+        let conversation;
+        let identity;
+
+        async function initializeChat() {
+            try {
+                // Get token from backend
+                const response = await fetch('http://localhost:8080/token');
+                const { token } = await response.json();
+
+                // Initialize the client
+                client = new Twilio.Conversations.Client(token);
+                
+                // Wait for client to be ready
+                await new Promise((resolve, reject) => {
+                    client.on('stateChanged', state => {
+                        console.log('Client state:', state);
+                        if (state === 'initialized') {
+                            resolve();
+                        }
+                    });
+                    
+                    // Add timeout to prevent hanging
+                    setTimeout(() => {
+                        reject(new Error('Client initialization timeout'));
+                    }, 10000);
+                });
+
+                identity = client.user.identity;
+                document.getElementById('status').textContent = `Connected as ${identity}`;
+
+                await setupConversation();
+
+                // Handle token expiration
+                client.on('tokenAboutToExpire', async () => {
+                    const response = await fetch('http://localhost:8080/token');
+                    const { token: newToken } = await response.json();
+                    await client.updateToken(newToken);
+                });
+
+            } catch (error) {
+                console.error('Initialization error:', error);
+                document.getElementById('status').textContent = 
+                    `Connection failed: ${error.message}. Please refresh the page.`;
+            }
+        }
+
+        async function setupConversation() {
+            const conversationName = 'group-room-chat';
+            
+            try {
+                // First try to get existing conversation
+                try {
+                    conversation = await client.getConversationByUniqueName(conversationName);
+                    console.log('Found existing conversation');
+                } catch (e) {
+                    // If not found, create new conversation
+                    console.log('Creating new conversation');
+                    conversation = await client.createConversation({
+                        uniqueName: conversationName,
+                        friendlyName: 'Group Chat'
+                    });
+                }
+
+                // Join the conversation if not already joined
+                if (!conversation.joined) {
+                    await conversation.join();
+                }
+
+                // Set up message handler
+                conversation.on('messageAdded', message => {
+                    addMessageToUI(message);
+                });
+
+                // Set up participant joined handler
+                conversation.on('participantJoined', participant => {
+                    console.log('Participant joined:', participant.identity);
+                });
+
+                document.getElementById('status').textContent = 
+                    `Connected as ${identity} - Ready to chat!`;
+
+            } catch (error) {
+                console.error('Error setting up conversation:', error);
+                throw error; // Propagate error to main error handler
+            }
+        }
+
+        function addMessageToUI(message) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${message.author === identity ? 'sent' : 'received'}`;
+            messageDiv.innerHTML = `
+                <strong>${message.author}:</strong> ${message.body}
+            `;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            
+            if (message && conversation) {
+                try {
+                    await conversation.sendMessage(message);
+                    input.value = '';
+                } catch (error) {
+                    console.error('Error sending message:', error);
+                    if (error.code === 50200) { // Token expired
+                        const response = await fetch('http://localhost:8080/token');
+                        const { token } = await response.json();
+                        await client.updateToken(token);
+                        // Retry sending the message
+                        await conversation.sendMessage(message);
+                        input.value = '';
+                    } else {
+                        alert('Failed to send message. Please try again.');
+                    }
+                }
+            }
+        }
+
+        // Handle Enter key
+        document.getElementById('messageInput').addEventListener('keypress', async (e) => {
+            if (e.key === 'Enter') {
+                await sendMessage();
+            }
+        });
+
+        // Initialize when page loads
+        window.addEventListener('load', initializeChat);
+    </script>
+</body>
+</html>
